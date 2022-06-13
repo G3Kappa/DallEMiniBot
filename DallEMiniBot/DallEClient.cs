@@ -15,10 +15,26 @@ public sealed class DallEClient
         HttpClient.DefaultRequestHeaders.Add("Accept-Encoding", "gzip, deflate, br");
         HttpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:101.0) Gecko/20100101 Firefox/101.0");
     }
-    public async Task<IEnumerable<byte[]>?> TryGetImages(string query, CancellationToken ct)
+    public async Task<IEnumerable<byte[]>?> TryGetImages(string query, Action? onRequestHeld = null, CancellationToken ct = default, int requestHoldDelayMs = 10000)
     {
         var jsonQuery = JsonConvert.SerializeObject(new { prompt = query });
-        var response = await HttpClient.PostAsync("/generate", new StringContent(jsonQuery, Encoding.UTF8, "application/json"), ct);
+        var requestTask = HttpClient.PostAsync("/generate", new StringContent(jsonQuery, Encoding.UTF8, "application/json"), ct);
+        var waitAny = Task.WaitAny(new[] { requestTask, Task.Delay(requestHoldDelayMs, ct) }, ct);
+
+        var response = default(HttpResponseMessage?);
+        switch (waitAny)
+        {
+            // If the request ended so soon, it's probably an error
+            default:
+                response = requestTask.Result;
+                break;
+            // If enough time passes and we're getting no errors, assume that the request went through and notify the caller
+            case 1:
+                onRequestHeld?.Invoke();
+                response = await requestTask;
+                break;
+        }
+
         try
         {
             response.EnsureSuccessStatusCode();

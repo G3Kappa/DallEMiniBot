@@ -5,7 +5,8 @@ var settings = (MaxWorkers: 3, OutputDirectory: Path.Combine(AppDomain.CurrentDo
 
 var promptAvailable = new AutoResetEvent(false);
 var prompts = new ConcurrentQueue<string>();
-var awaiting = new HashSet<string>();
+var awaiting = new HashSet<(string Prompt, DateTime StartedOn)>();
+var processing = new HashSet<(string Prompt, DateTime StartedOn)>();
 var cts = new CancellationTokenSource();
 
 Notification.SetupEvents();
@@ -16,7 +17,7 @@ Console.CancelKeyPress += (s, e) =>
     promptAvailable.Set();
 };
 
-var getBackgroundWorker = async (string prompt) =>
+var getBackgroundWorker = async (string prompt, Action onRequestHeld) =>
 {
     var rand = new Random();
     var client = new DallEClient();
@@ -24,7 +25,7 @@ var getBackgroundWorker = async (string prompt) =>
     var maybeImages = default(IEnumerable<byte[]>?);
     while (!cts.IsCancellationRequested)
     {
-        if ((maybeImages = await client.TryGetImages(prompt!, cts.Token)) is null)
+        if ((maybeImages = await client.TryGetImages(prompt!, onRequestHeld, cts.Token)) is null)
         {
             await Task.Delay(rand.Next(25, 75), cts.Token);
             continue;
@@ -78,12 +79,20 @@ Task.Run(() =>
         {
 
             semaphore.Wait();
-            new Notification("Running", prompt).Show();
+            new Notification("Running worker", prompt).Show();
             _ = Task.Run(async () =>
             {
-                lock (awaiting) awaiting.Add(prompt);
-                await getBackgroundWorker(prompt);
-                lock (awaiting) awaiting.Remove(prompt);
+                var awaitingDesc = (prompt, DateTime.Now);
+                lock (awaiting) awaiting.Add(awaitingDesc);
+                await getBackgroundWorker(prompt, () =>
+                {
+                    lock (awaiting)
+                        awaiting.Remove(awaitingDesc);
+                    lock (processing)
+                        processing.Add(awaitingDesc);
+
+                    new Notification("Generation in progress", prompt!).Show();
+                });
                 semaphore.Release();
             }, cts.Token);
         }
@@ -130,13 +139,27 @@ var runCommands = (string prompt) =>
         {
             if (awaiting.Count == 0)
             {
-                WriteLine($"There are no running workers.");
+                WriteLine($"There are no retrying workers.");
             }
             else
             {
-                WriteLine($"Running workers:");
-                foreach (var worker in awaiting)
-                    WriteLine($"\t- {worker}");
+                WriteLine($"Retrying:");
+                foreach (var worker in awaiting.OrderBy(x => x.StartedOn))
+                    WriteLine($"\t- {worker.Prompt} (Elapsed: {DateTime.Now - worker.StartedOn:hh\\:mm\\:ss})");
+            }
+        }
+
+        lock (processing)
+        {
+            if (processing.Count == 0)
+            {
+                WriteLine($"There are no waiting workers.");
+            }
+            else
+            {
+                WriteLine($"Waiting:");
+                foreach (var worker in processing.OrderBy(x => x.StartedOn))
+                    WriteLine($"\t- {worker.Prompt} (Elapsed: {DateTime.Now - worker.StartedOn:hh\\:mm\\:ss})");
             }
         }
     }
