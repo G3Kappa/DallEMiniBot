@@ -1,11 +1,13 @@
-﻿
-using Microsoft.Toolkit.Uwp.Notifications;
-using System.Collections.Concurrent;
-
-var cts = new CancellationTokenSource();
-Console.CancelKeyPress += (s, e) => cts.Cancel(false);
+﻿using System.Collections.Concurrent;
 
 var promptAvailable = new AutoResetEvent(false);
+var cts = new CancellationTokenSource();
+Console.CancelKeyPress += (s, e) =>
+{
+    e.Cancel = true;
+    cts.Cancel(false);
+    promptAvailable.Set();
+};
 
 var prompts = new ConcurrentQueue<string>();
 var outputDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "images/");
@@ -20,16 +22,10 @@ var getBackgroundWorker = async (string prompt) =>
     var maybeImages = default(IEnumerable<byte[]>?);
     while (!cts.IsCancellationRequested)
     {
-        if ((maybeImages = await client.TryGetImages(prompt!)) is null)
+        if ((maybeImages = await client.TryGetImages(prompt!, cts.Token)) is null)
         {
             // Wait for a randomized amount of time to hide the fact that this is a bot
-            await Task.Delay(rand.Next(250, 1000));
-            // Also, occasionally stop spamming requests for a longer while 
-            if (rand.Next(25) == 0)
-            {
-                //await Task.Delay(rand.Next(1000, 5000));
-            }
-
+            await Task.Delay(rand.Next(250, 1000), cts.Token);
             continue;
         }
 
@@ -43,7 +39,7 @@ var getBackgroundWorker = async (string prompt) =>
         await Save(image, fn, cts.Token);
     }
 
-    ResultNotification(prompt!, baseFn, writeToConsole: false);
+    new Notification("Generated", prompt!, $"{baseFn} (1).png").Show();
 
     static async Task Save(ReadOnlyMemory<byte> image, string fn, CancellationToken ct)
     {
@@ -62,12 +58,12 @@ Task.Run(() =>
         while (prompts.TryDequeue(out var prompt))
         {
             semaphore.Wait();
-            GenericNotification("Running", prompt, writeToConsole: false);
+            new Notification("Running", prompt).Show();
             _ = Task.Run(async () =>
             {
                 await getBackgroundWorker(prompt);
                 semaphore.Release();
-            });
+            }, cts.Token);
         }
     }
 });
@@ -78,29 +74,9 @@ while (!cts.IsCancellationRequested)
     var prompt = Console.ReadLine();
     if (string.IsNullOrWhiteSpace(prompt))
         continue;
-    GenericNotification("Enqueued", prompt, writeToConsole: true);
+    if (cts.IsCancellationRequested)
+        break;
+    new Notification("Enqueued", prompt).Show();
     prompts.Enqueue(prompt);
     promptAvailable.Set();
-}
-
-static void ResultNotification(string prompt, string fn, bool writeToConsole)
-{
-    var title = "Result";
-    if (writeToConsole)
-        Console.WriteLine($"{title}: {prompt}");
-    new ToastContentBuilder()
-        .AddText(title)
-        .AddText(prompt)
-        .AddInlineImage(new Uri($"{fn} (1).png"))
-        .Show();
-}
-
-static void GenericNotification(string title, string prompt, bool writeToConsole)
-{
-    if (writeToConsole)
-        Console.WriteLine($"{title}: {prompt}");
-    new ToastContentBuilder()
-        .AddText(title)
-        .AddText(prompt)
-        .Show();
 }
