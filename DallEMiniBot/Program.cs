@@ -1,7 +1,14 @@
 ﻿using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 
-var settings = (MaxWorkers: 3, OutputDirectory: Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "images\\"));
+var settings = (
+    // The maximum number of parallel workers. See also !max_workers
+    MaxWorkers: 3,
+    // The folder where the output of this bot will be stored. See also !output_dir
+    OutputDirectory: Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "images\\"),
+    // The amount of time after which a waiting request will be dropped and recycled. See also !retry_timeout
+    RetryTimeout: TimeSpan.FromMinutes(5)
+);
 
 var promptAvailable = new AutoResetEvent(false);
 var prompts = new ConcurrentQueue<string>();
@@ -25,7 +32,24 @@ var getBackgroundWorker = async (string prompt, Action onRequestHeld) =>
     var maybeImages = default(IEnumerable<byte[]>?);
     while (!cts.IsCancellationRequested)
     {
-        if ((maybeImages = await client.TryGetImages(prompt!, onRequestHeld, cts.Token)) is null)
+        var request = client.TryGetImages(prompt!, onRequestHeld, cts.Token);
+        var waitAny = Task.WaitAny(new[] { request, Task.Delay(settings.RetryTimeout) }, cts.Token);
+
+        switch (waitAny)
+        {
+            // If the request ended before the timeout, that's good
+            default:
+                maybeImages = request.Result;
+                break;
+            // If we're left hanging for several minutes, drop this request
+            case 1:
+                new Notification("Retrying", prompt).Show();
+                prompts.Enqueue(prompt);
+                promptAvailable.Set();
+                return;
+        }
+
+        if (maybeImages is null)
         {
             await Task.Delay(rand.Next(25, 75), cts.Token);
             continue;
@@ -93,6 +117,7 @@ Task.Run(() =>
 
                     new Notification("Generation in progress", prompt!).Show();
                 });
+                processing.Remove(awaitingDesc);
                 semaphore.Release();
             }, cts.Token);
         }
