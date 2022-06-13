@@ -19,8 +19,8 @@ public readonly struct Notification
     {
         ToastNotificationManagerCompat.OnActivated += (source) =>
         {
-            var args = source.Argument.Split(';')
-                .Select(eq => eq.Split('='))
+            var args = source.Argument.Split(';', StringSplitOptions.RemoveEmptyEntries)
+                .Select(eq => eq.Split('=', StringSplitOptions.RemoveEmptyEntries))
                 .ToDictionary(s => s[0], s => s[1]);
             if (args.TryGetValue("Preview", out var previewFile) && File.Exists(previewFile))
             {

@@ -1,7 +1,7 @@
 ﻿using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 
-var settings = (MaxWorkers: 3, OutputDirectory: Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "images/"));
+var settings = (MaxWorkers: 3, OutputDirectory: Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "images\\"));
 
 var promptAvailable = new AutoResetEvent(false);
 var prompts = new ConcurrentQueue<string>();
@@ -26,8 +26,7 @@ var getBackgroundWorker = async (string prompt) =>
     {
         if ((maybeImages = await client.TryGetImages(prompt!, cts.Token)) is null)
         {
-            // Wait for a randomized amount of time to hide the fact that this is a bot
-            await Task.Delay(rand.Next(250, 1000), cts.Token);
+            await Task.Delay(rand.Next(25, 75), cts.Token);
             continue;
         }
 
@@ -41,14 +40,18 @@ var getBackgroundWorker = async (string prompt) =>
     if (!Directory.Exists(outputDir))
         Directory.CreateDirectory(outputDir);
 
-    var baseFn = Path.Combine(outputDir, new SanitizedFileName(prompt!, replacement: "_").Value);
+    var sanitizedPrompt = new SanitizedFileName(prompt!, replacement: "_").Value;
+    var baseFn = Path.Combine(outputDir, $"{sanitizedPrompt}\\");
+    if (!Directory.Exists(baseFn))
+        Directory.CreateDirectory(baseFn);
+
     foreach (var (image, index) in maybeImages!.Select((e, i) => (e, i)))
     {
-        var fn = $"{baseFn} ({index + 1}).png";
+        var fn = $"{baseFn}{index + 1}.png";
         await Save(image, fn, cts.Token);
     }
 
-    new Notification("Generated", prompt!, $"{baseFn} (1).png").Show();
+    new Notification("Generated", prompt!, $"{baseFn}1.png").Show();
 
     static async Task Save(ReadOnlyMemory<byte> image, string fn, CancellationToken ct)
     {
@@ -176,7 +179,6 @@ while (!cts.IsCancellationRequested)
         WriteLine($"Enqueued: {prompt}");
         prompts.Enqueue(prompt);
         promptAvailable.Set();
-        new Notification("Enqueued", prompt).Show();
     }
 }
 
