@@ -191,7 +191,7 @@ var runCommands = (string prompt) =>
         },
         {
             (Command: () => command(prompt)(new(@"^\s*!retry_timeout(\s+\d+)?\s*$", RegexOptions.Compiled), GetOrSetRetryTimeout),
-                Help: "!retry_timeout: gets or sets the amount of time after which a running request will be dropped and recycled (in seconds)")
+                Help: "!retry_timeout: gets or sets the amount of time after which a running worker will be killed and its prompt re-enqueued (in seconds)")
         },
         {
             (Command: () => command(prompt)(new(@"^\s*!kill(\s+[^\s]+?)?\s*$", RegexOptions.Compiled), Kill),
