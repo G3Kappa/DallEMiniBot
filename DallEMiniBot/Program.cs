@@ -11,8 +11,9 @@ var settings = (
 );
 var prompts = new ConcurrentQueue<string>();
 var promptAvailable = new AutoResetEvent(false);
-var awaiting = new HashSet<Worker>();
-var processing = new HashSet<Worker>();
+var done = new HashSet<Worker>();
+var failing = new HashSet<Worker>();
+var running = new HashSet<Worker>();
 var pending = new HashSet<Worker>();
 var cts = new CancellationTokenSource();
 
@@ -127,15 +128,15 @@ var workerManagerTask = Task.Run(() =>
             _ = Task.Run(async () =>
             {
                 var linkedToken = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, workerCts.Token).Token;
-                lock (awaiting) awaiting.Add(worker);
+                lock (failing) failing.Add(worker);
                 try
                 {
                     await getBackgroundWorker(prompt, () =>
                     {
-                        lock (awaiting)
-                            awaiting.Remove(worker);
-                        lock (processing)
-                            processing.Add(worker);
+                        lock (failing)
+                            failing.Remove(worker);
+                        lock (running)
+                            running.Add(worker);
 
                         new Notification("Generation in progress", prompt!).Show();
                     }, linkedToken);
@@ -143,14 +144,14 @@ var workerManagerTask = Task.Run(() =>
                 catch (OperationCanceledException) when (!workerCts.IsCancellationRequested) { }
                 finally
                 {
-                    lock (awaiting)
+                    lock (failing)
                     {
-                        awaiting.Remove(worker);
+                        failing.Remove(worker);
                     }
 
-                    lock (processing)
+                    lock (running)
                     {
-                        processing.Remove(worker);
+                        running.Remove(worker);
                     }
 
                     semaphore.Release();
@@ -204,31 +205,45 @@ var runCommands = (string prompt) =>
 
     void PrintRunningWorkers(Match _)
     {
-        lock (awaiting)
+        lock (done)
         {
-            if (awaiting.Count == 0)
+            if (done.Count == 0)
             {
-                WriteLine($"There are no failing prompts.");
+                WriteLine($"No prompts have finished yet.");
             }
             else
             {
-                WriteLine($"Failing:");
-                foreach (var worker in awaiting.OrderBy(x => x.StartedOn))
-                    WriteLine($"\t- {worker.Prompt} (Elapsed: {DateTime.Now - worker.StartedOn:hh\\:mm\\:ss})");
+                WriteLine($"Finished:");
+                foreach (var worker in done.OrderBy(x => x.StartedOn))
+                    WriteLine($"\t- {worker.Prompt} (Elapsed: {DateTime.Now - worker.StartedOn:hh\\:mm\\:ss})", fg: ConsoleColor.Green);
             }
         }
 
-        lock (processing)
+        lock (running)
         {
-            if (processing.Count == 0)
+            if (running.Count == 0)
             {
                 WriteLine($"There are no running prompts.");
             }
             else
             {
                 WriteLine($"Running:");
-                foreach (var worker in processing.OrderBy(x => x.StartedOn))
-                    WriteLine($"\t- {worker.Prompt} (Elapsed: {DateTime.Now - worker.StartedOn:hh\\:mm\\:ss})");
+                foreach (var worker in running.OrderBy(x => x.StartedOn))
+                    WriteLine($"\t- {worker.Prompt} (Elapsed: {DateTime.Now - worker.StartedOn:hh\\:mm\\:ss})", fg: ConsoleColor.Cyan);
+            }
+        }
+
+        lock (failing)
+        {
+            if (failing.Count == 0)
+            {
+                WriteLine($"There are no failing prompts.");
+            }
+            else
+            {
+                WriteLine($"Failing:");
+                foreach (var worker in failing.OrderBy(x => x.StartedOn))
+                    WriteLine($"\t- {worker.Prompt} (Elapsed: {DateTime.Now - worker.StartedOn:hh\\:mm\\:ss})", fg: ConsoleColor.Red);
             }
         }
 
@@ -242,7 +257,7 @@ var runCommands = (string prompt) =>
             {
                 WriteLine($"Pending:");
                 foreach (var worker in pending.OrderBy(x => x.StartedOn))
-                    WriteLine($"\t- {worker.Prompt} (Elapsed: {DateTime.Now - worker.StartedOn:hh\\:mm\\:ss})");
+                    WriteLine($"\t- {worker.Prompt} (Elapsed: {DateTime.Now - worker.StartedOn:hh\\:mm\\:ss})", fg: ConsoleColor.Blue);
             }
         }
 
@@ -255,7 +270,7 @@ var runCommands = (string prompt) =>
         {
             WriteLine($"Waiting:");
             foreach (var prompt in enqueued)
-                WriteLine($"\t- {prompt}");
+                WriteLine($"\t- {prompt}", fg: ConsoleColor.DarkGray);
         }
 
     }
@@ -270,7 +285,14 @@ var runCommands = (string prompt) =>
         }
 
         var newVal = settings.MaxWorkers = int.Parse(m.Groups[1].Value.Trim());
+        if (newVal <= 0)
+        {
+            WriteLine($"Can only set a positive amount of workers.", "ERR", fg: ConsoleColor.Red);
+            return;
+        }
+
         WriteLine($"Max workers: {oldVal}->{newVal}. This change will only reflect once all workers terminate.");
+        promptAvailable.Set();
     }
 
     void GetOrSetRetryTimeout(Match m)
@@ -297,7 +319,7 @@ var runCommands = (string prompt) =>
         LockQueues(() =>
         {
             var enqueued = prompts.ToArray();
-            var matches = awaiting.Concat(processing).Concat(pending).Concat(enqueued.Select(p => new Worker(p, default, new())))
+            var matches = failing.Concat(running).Concat(pending).Concat(enqueued.Select(p => new Worker(p, default, new())))
                 .Where(x => x.Prompt.StartsWith(m.Groups[1].Value.Trim(), StringComparison.OrdinalIgnoreCase));
             var count = matches.Count();
 
@@ -311,7 +333,7 @@ var runCommands = (string prompt) =>
             {
                 if (enqueued.Contains(worker.Prompt))
                 {
-                    for (int i = 0; i < enqueued.Length && prompts.TryDequeue(out var p) && !p.Equals(worker.Prompt); ++i)
+                    for (var i = 0; i < enqueued.Length && prompts.TryDequeue(out var p) && !p.Equals(worker.Prompt); ++i)
                     {
                         prompts.Enqueue(p!);
                     }
@@ -340,8 +362,8 @@ var runCommands = (string prompt) =>
 
     void LockQueues(Action callback)
     {
-        lock (awaiting!)
-            lock (processing!)
+        lock (failing!)
+            lock (running!)
                 lock (pending!)
                     callback();
     }
