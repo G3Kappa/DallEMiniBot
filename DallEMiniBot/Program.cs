@@ -113,7 +113,7 @@ var workerManagerTask = Task.Run(() =>
         while (prompts.TryDequeue(out var prompt))
         {
             var workerCts = new CancellationTokenSource();
-            var worker = new Worker(prompt, DateTime.Now, workerCts);
+            var worker = new Worker(prompt, DateTime.Now, null, workerCts);
             pending.Add(worker);
             semaphore.Wait();
             if (!pending.Contains(worker))
@@ -142,7 +142,7 @@ var workerManagerTask = Task.Run(() =>
                     }, linkedToken);
                     lock (done)
                     {
-                        done.Add(worker);
+                        done.Add(new(worker.Prompt, worker.StartedOn, DateTime.Now, worker.KillSource));
                     }
                 }
                 catch (OperationCanceledException) when (!workerCts.IsCancellationRequested) { }
@@ -219,7 +219,7 @@ var runCommands = (string prompt) =>
             {
                 WriteLine($"Finished:");
                 foreach (var worker in done.OrderBy(x => x.StartedOn))
-                    WriteLine($"\t- {worker.Prompt} (Elapsed: {DateTime.Now - worker.StartedOn:hh\\:mm\\:ss})", fg: ConsoleColor.Green);
+                    WriteLine($"\t- {worker.Prompt} (Elapsed: {worker.EndedOn! - worker.StartedOn:hh\\:mm\\:ss})", fg: ConsoleColor.Green);
             }
         }
 
@@ -323,7 +323,7 @@ var runCommands = (string prompt) =>
         LockQueues(() =>
         {
             var enqueued = prompts.ToArray();
-            var matches = failing.Concat(running).Concat(pending).Concat(enqueued.Select(p => new Worker(p, default, new())))
+            var matches = failing.Concat(running).Concat(pending).Concat(enqueued.Select(p => new Worker(p, default, default, new())))
                 .Where(x => x.Prompt.StartsWith(m.Groups[1].Value.Trim(), StringComparison.OrdinalIgnoreCase));
             var count = matches.Count();
 
@@ -400,4 +400,4 @@ static void WriteLine(string msg, string tag = "SYS", ConsoleColor fg = ConsoleC
     Console.ForegroundColor = ConsoleColor.White;
 }
 
-public readonly record struct Worker(string Prompt, DateTime StartedOn, CancellationTokenSource KillSource);
+public readonly record struct Worker(string Prompt, DateTime StartedOn, DateTime? EndedOn, CancellationTokenSource KillSource);
