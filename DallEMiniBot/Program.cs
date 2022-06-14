@@ -140,6 +140,10 @@ var workerManagerTask = Task.Run(() =>
 
                         new Notification("Generation in progress", prompt!).Show();
                     }, linkedToken);
+                    lock (done)
+                    {
+                        done.Add(worker);
+                    }
                 }
                 catch (OperationCanceledException) when (!workerCts.IsCancellationRequested) { }
                 finally
