@@ -189,7 +189,7 @@ var runCommands = (string prompt) =>
                 Help: "!retry_timeout: gets or sets the amount of time after which a waiting request will be dropped and recycled (in seconds).")
         },
         {
-            (Command: () => command(prompt)(new(@"^\s*!kill(\s+.*?)?\s*$", RegexOptions.Compiled), Kill),
+            (Command: () => command(prompt)(new(@"^\s*!kill(\s+[^\s]+?)?\s*$", RegexOptions.Compiled), Kill),
                 Help: "!kill: kills a worker and stops all underlying requests.")
         },
     };
@@ -255,7 +255,7 @@ var runCommands = (string prompt) =>
         {
             WriteLine($"Waiting:");
             foreach (var prompt in enqueued)
-                WriteLine($"\t- {prompt})");
+                WriteLine($"\t- {prompt}");
         }
 
     }
@@ -294,37 +294,40 @@ var runCommands = (string prompt) =>
             return;
         }
 
-        lock (awaiting)
+        LockQueues(() =>
         {
-            lock (processing)
+            var enqueued = prompts.ToArray();
+            var matches = awaiting.Concat(processing).Concat(pending).Concat(enqueued.Select(p => new Worker(p, default, new())))
+                .Where(x => x.Prompt.StartsWith(m.Groups[1].Value.Trim(), StringComparison.OrdinalIgnoreCase));
+            var count = matches.Count();
+
+            if (count == 0)
             {
-                lock (pending)
-                {
-                    var matches = awaiting.Concat(processing).Concat(pending)
-                        .Where(x => x.Prompt.StartsWith(m.Groups[1].Value.Trim(), StringComparison.OrdinalIgnoreCase));
-                    var count = matches.Count();
-                    if (count > 1)
-                    {
-                        WriteLine($"More than one match was found. Be more specific.", "ERR", ConsoleColor.Red);
-                        return;
-                    }
-
-                    if (count == 0)
-                    {
-                        WriteLine($"No matches.", "ERR", ConsoleColor.Red);
-                        return;
-                    }
-
-                    var worker = matches.Single();
-                    worker.KillSource.Cancel();
-                    WriteLine($"Discarded: {worker.Prompt}");
-                    new Notification("Discarded", worker.Prompt).Show();
-                    pending.Remove(worker);
-                    promptAvailable.Set();
-                }
+                WriteLine($"No matches.", "ERR", ConsoleColor.Red);
+                return;
             }
-        }
 
+            foreach (var worker in matches)
+            {
+                if (enqueued.Contains(worker.Prompt))
+                {
+                    for (int i = 0; i < enqueued.Length; ++i)
+                    {
+                        if (prompts.TryDequeue(out var p) && p.Equals(worker.Prompt))
+                            break;
+                        prompts.Enqueue(p!);
+                    }
+                }
+
+                worker.KillSource.Cancel();
+                WriteLine($"Discarded: {worker.Prompt}");
+                new Notification("Discarded", worker.Prompt).Show();
+                pending.Remove(worker);
+            }
+
+            promptAvailable.Set();
+
+        });
     }
 
     void UnknownCommand(Match m) => Console.WriteLine($"Unknown command: {m.Groups[1].Value}");
@@ -335,6 +338,14 @@ var runCommands = (string prompt) =>
         {
             WriteLine($"\t- {d.Help}");
         }
+    }
+
+    void LockQueues(Action callback)
+    {
+        lock (awaiting!)
+            lock (processing!)
+                lock (pending!)
+                    callback();
     }
 };
 
