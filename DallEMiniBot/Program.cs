@@ -6,7 +6,7 @@ var settings = (
     MaxWorkers: 3,
     // The folder where the output of this bot will be stored. See also !output_dir
     OutputDirectory: Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "images\\"),
-    // The amount of time after which a waiting request will be dropped and recycled. See also !retry_timeout
+    // The amount of time after which a running request will be dropped and recycled. See also !retry_timeout
     RetryTimeout: TimeSpan.FromMinutes(4)
 );
 var prompts = new ConcurrentQueue<string>();
@@ -191,7 +191,7 @@ var runCommands = (string prompt) =>
         },
         {
             (Command: () => command(prompt)(new(@"^\s*!retry_timeout(\s+\d+)?\s*$", RegexOptions.Compiled), GetOrSetRetryTimeout),
-                Help: "!retry_timeout: gets or sets the amount of time after which a waiting request will be dropped and recycled (in seconds)")
+                Help: "!retry_timeout: gets or sets the amount of time after which a running request will be dropped and recycled (in seconds)")
         },
         {
             (Command: () => command(prompt)(new(@"^\s*!kill(\s+[^\s]+?)?\s*$", RegexOptions.Compiled), Kill),
