@@ -7,7 +7,7 @@ var settings = (
     // The folder where the output of this bot will be stored. See also !output_dir
     OutputDirectory: Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "images\\"),
     // The amount of time after which a waiting request will be dropped and recycled. See also !retry_timeout
-    RetryTimeout: TimeSpan.FromMinutes(5)
+    RetryTimeout: TimeSpan.FromMinutes(4)
 );
 var promptAvailable = new AutoResetEvent(false);
 var prompts = new ConcurrentQueue<string>();
@@ -26,35 +26,41 @@ Console.CancelKeyPress += (s, e) =>
 var getBackgroundWorker = async (string prompt, Action onRequestHeld) =>
 {
     var rand = new Random();
-    var client = new DallEClient();
 
     var maybeImages = default(IEnumerable<byte[]>?);
     while (!cts.IsCancellationRequested)
     {
-        var newCts = new CancellationTokenSource();
-        var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(newCts.Token, cts.Token);
-
-        var request = client.TryGetImages(prompt!, onRequestHeld, linkedCts.Token);
-        var waitAny = Task.WaitAny(new[] { request, Task.Delay(settings.RetryTimeout, cts.Token) }, cts.Token);
+        using var client = new DallEClient();
+        var request = client.TryGetImages(prompt!, settings.RetryTimeout, onRequestHeld, cts.Token);
+        var delay = Task.Delay(settings.RetryTimeout, cts.Token);
+        var waitAny = Task.WaitAny(new[] { request, delay }, cts.Token);
 
         switch (waitAny)
         {
             // If the request ended before the timeout, that's good
             default:
-                maybeImages = request.Result;
+                if (request.IsFaulted)
+                {
+                    WriteLine($"\r\n{request.Exception!.Message}", tag: "ERR", fg: ConsoleColor.Red);
+                    return;
+                }
+                else
+                {
+                    maybeImages = request.Result;
+                }
+
                 break;
             // If we're left hanging for several minutes, drop this request
             case 1:
                 new Notification("Retrying", prompt).Show();
                 prompts.Enqueue(prompt);
                 promptAvailable.Set();
-                newCts.Cancel(true);
                 return;
         }
 
         if (maybeImages is null)
         {
-            await Task.Delay(rand.Next(25, 75), cts.Token);
+            await Task.Delay(rand.Next(250, 750), cts.Token);
             continue;
         }
 
@@ -252,9 +258,9 @@ while (!cts.IsCancellationRequested)
 if (!workerManagerTask.IsCompleted)
     await workerManagerTask;
 
-static void WriteLine(string msg)
+static void WriteLine(string msg, string tag = "SYS", ConsoleColor fg = ConsoleColor.Gray)
 {
-    Console.ForegroundColor = ConsoleColor.Gray;
-    Console.WriteLine($"SYS {msg}");
+    Console.ForegroundColor = fg;
+    Console.WriteLine($"{tag} {msg}");
     Console.ForegroundColor = ConsoleColor.White;
 }

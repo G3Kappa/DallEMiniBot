@@ -2,7 +2,7 @@
 using System.Net;
 using System.Text;
 
-public sealed class DallEClient
+public sealed class DallEClient : IDisposable
 {
     private readonly HttpClient HttpClient;
     public DallEClient()
@@ -15,11 +15,17 @@ public sealed class DallEClient
         HttpClient.DefaultRequestHeaders.Add("Accept-Encoding", "gzip, deflate, br");
         HttpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:101.0) Gecko/20100101 Firefox/101.0");
     }
-    public async Task<IEnumerable<byte[]>?> TryGetImages(string query, Action? onRequestHeld = null, CancellationToken ct = default, int requestHoldDelayMs = 10000)
+
+    public void Dispose() => ((IDisposable)HttpClient).Dispose();
+
+    public async Task<IEnumerable<byte[]>?> TryGetImages(string query, TimeSpan timeout, Action? onRequestHeld = null, CancellationToken ct = default, int requestHoldDelayMs = 10000)
     {
+        HttpClient.Timeout = timeout;
+
         var jsonQuery = JsonConvert.SerializeObject(new { prompt = query });
         var requestTask = HttpClient.PostAsync("/generate", new StringContent(jsonQuery, Encoding.UTF8, "application/json"), ct);
-        var waitAny = Task.WaitAny(new[] { requestTask, Task.Delay(requestHoldDelayMs, ct) }, ct);
+        var delayTask = Task.Delay(requestHoldDelayMs, ct);
+        var waitAny = Task.WaitAny(new[] { requestTask, delayTask }, ct);
 
         var response = default(HttpResponseMessage?);
         switch (waitAny)
