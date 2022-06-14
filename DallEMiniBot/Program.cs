@@ -9,7 +9,6 @@ var settings = (
     // The amount of time after which a waiting request will be dropped and recycled. See also !retry_timeout
     RetryTimeout: TimeSpan.FromMinutes(5)
 );
-
 var promptAvailable = new AutoResetEvent(false);
 var prompts = new ConcurrentQueue<string>();
 var awaiting = new HashSet<(string Prompt, DateTime StartedOn)>();
@@ -20,7 +19,7 @@ Notification.SetupEvents();
 Console.CancelKeyPress += (s, e) =>
 {
     e.Cancel = true;
-    cts.Cancel(false);
+    cts.Cancel(true);
     promptAvailable.Set();
 };
 
@@ -32,8 +31,11 @@ var getBackgroundWorker = async (string prompt, Action onRequestHeld) =>
     var maybeImages = default(IEnumerable<byte[]>?);
     while (!cts.IsCancellationRequested)
     {
-        var request = client.TryGetImages(prompt!, onRequestHeld, cts.Token);
-        var waitAny = Task.WaitAny(new[] { request, Task.Delay(settings.RetryTimeout) }, cts.Token);
+        var newCts = new CancellationTokenSource();
+        var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(newCts.Token, cts.Token);
+
+        var request = client.TryGetImages(prompt!, onRequestHeld, linkedCts.Token);
+        var waitAny = Task.WaitAny(new[] { request, Task.Delay(settings.RetryTimeout, cts.Token) }, cts.Token);
 
         switch (waitAny)
         {
@@ -46,6 +48,7 @@ var getBackgroundWorker = async (string prompt, Action onRequestHeld) =>
                 new Notification("Retrying", prompt).Show();
                 prompts.Enqueue(prompt);
                 promptAvailable.Set();
+                newCts.Cancel(true);
                 return;
         }
 
@@ -85,7 +88,7 @@ var getBackgroundWorker = async (string prompt, Action onRequestHeld) =>
     }
 };
 
-Task.Run(() =>
+var workerManagerTask = Task.Run(() =>
 {
     var maxWorkers = settings.MaxWorkers;
     // Regulates the amount of parallel worker threads
@@ -142,11 +145,15 @@ var runCommands = (string prompt) =>
     {
         {
             (Command: () => command(prompt)(new(@"^\s*!workers\s*$", RegexOptions.Compiled), PrintRunningWorkers),
-            Help: "!workers: shows the list of running workers")
+                Help: "!workers: shows the list of running workers")
         },
         {
-            (Command: () => command(prompt)(new(@"^\s*::max_workers\s+(\d+)?\s*$", RegexOptions.Compiled), GetOrSetMaxWorkers),
-            Help: "!max_workers: gets or sets the maximum amount of running workers")
+            (Command: () => command(prompt)(new(@"^\s*!max_workers(\s+\d+)?\s*$", RegexOptions.Compiled), GetOrSetMaxWorkers),
+                Help: "!max_workers: gets or sets the maximum amount of running workers")
+        },
+        {
+            (Command: () => command(prompt)(new(@"^\s*!retry_timeout(\s+\d+)?\s*$", RegexOptions.Compiled), GetOrSetRetryTimeout),
+                Help: "!retry_timeout: gets or sets the amount of time after which a waiting request will be dropped and recycled (in seconds).")
         },
     };
 
@@ -155,7 +162,7 @@ var runCommands = (string prompt) =>
             Help: "!help: shows this list"));
 
     return definitions.Any(d => d.Command())
-        || command(prompt)(new(@"^\s*::([^\s]*).*?\s*$", RegexOptions.Compiled), UnknownCommand)
+        || command(prompt)(new(@"^\s*!([^\s]*).*?\s*$", RegexOptions.Compiled), UnknownCommand)
         ;
 
     void PrintRunningWorkers(Match _)
@@ -198,8 +205,21 @@ var runCommands = (string prompt) =>
             return;
         }
 
-        var newVal = settings.MaxWorkers = int.Parse(m.Groups[1].Value);
-        WriteLine($"Max workers: {oldVal}->{newVal}");
+        var newVal = settings.MaxWorkers = int.Parse(m.Groups[1].Value.Trim());
+        WriteLine($"Max workers: {oldVal}->{newVal}. This change will only reflect once all workers terminate.");
+    }
+
+    void GetOrSetRetryTimeout(Match m)
+    {
+        var oldVal = settings.RetryTimeout;
+        if (!m.Groups[1].Success)
+        {
+            WriteLine($"Retry timeout: {oldVal.TotalSeconds}");
+            return;
+        }
+
+        var newVal = settings.RetryTimeout = TimeSpan.FromSeconds(int.Parse(m.Groups[1].Value.Trim()));
+        WriteLine($"Retry timeout: {oldVal}->{newVal}");
     }
 
     void UnknownCommand(Match m) => Console.WriteLine($"Unknown command: {m.Groups[1].Value}");
@@ -218,10 +238,10 @@ while (!cts.IsCancellationRequested)
 {
     Console.Write("dalle-mini> ");
     var prompt = Console.ReadLine();
+    if (cts.IsCancellationRequested || prompt == null) // prompt = null when Ctrl+C is pressed, so cts.IsCancellationRequested is about to become true
+        break;
     if (string.IsNullOrWhiteSpace(prompt))
         continue;
-    if (cts.IsCancellationRequested)
-        break;
     if (!runCommands(prompt))
     {
         WriteLine($"Enqueued: {prompt}");
@@ -229,6 +249,9 @@ while (!cts.IsCancellationRequested)
         promptAvailable.Set();
     }
 }
+
+if (!workerManagerTask.IsCompleted)
+    await workerManagerTask;
 
 static void WriteLine(string msg)
 {
