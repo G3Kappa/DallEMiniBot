@@ -9,8 +9,8 @@ var settings = (
     // The amount of time after which a waiting request will be dropped and recycled. See also !retry_timeout
     RetryTimeout: TimeSpan.FromMinutes(4)
 );
-var promptAvailable = new AutoResetEvent(false);
 var prompts = new ConcurrentQueue<string>();
+var promptAvailable = new AutoResetEvent(false);
 var awaiting = new HashSet<(string Prompt, DateTime StartedOn)>();
 var processing = new HashSet<(string Prompt, DateTime StartedOn)>();
 var cts = new CancellationTokenSource();
@@ -176,7 +176,7 @@ var runCommands = (string prompt) =>
         {
             if (awaiting.Count == 0)
             {
-                WriteLine($"There are no retrying workers.");
+                WriteLine($"There are no retrying prompts.");
             }
             else
             {
@@ -190,15 +190,28 @@ var runCommands = (string prompt) =>
         {
             if (processing.Count == 0)
             {
-                WriteLine($"There are no waiting workers.");
+                WriteLine($"There are no running prompts.");
             }
             else
             {
-                WriteLine($"Waiting:");
+                WriteLine($"Running:");
                 foreach (var worker in processing.OrderBy(x => x.StartedOn))
                     WriteLine($"\t- {worker.Prompt} (Elapsed: {DateTime.Now - worker.StartedOn:hh\\:mm\\:ss})");
             }
         }
+
+        var enqueued = prompts.ToArray();
+        if (processing.Count == 0)
+        {
+            WriteLine($"There are no waiting prompts.");
+        }
+        else
+        {
+            WriteLine($"Waiting:");
+            foreach (var prompt in enqueued)
+                WriteLine($"\t- {prompt})");
+        }
+
     }
 
     void GetOrSetMaxWorkers(Match m)
