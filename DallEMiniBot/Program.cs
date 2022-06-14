@@ -13,6 +13,7 @@ var prompts = new ConcurrentQueue<string>();
 var promptAvailable = new AutoResetEvent(false);
 var awaiting = new HashSet<Worker>();
 var processing = new HashSet<Worker>();
+var pending = new HashSet<Worker>();
 var cts = new CancellationTokenSource();
 
 Notification.SetupEvents();
@@ -110,12 +111,21 @@ var workerManagerTask = Task.Run(() =>
 
         while (prompts.TryDequeue(out var prompt))
         {
+            var workerCts = new CancellationTokenSource();
+            var worker = new Worker(prompt, DateTime.Now, workerCts);
+            pending.Add(worker);
             semaphore.Wait();
+            if (!pending.Contains(worker))
+            {
+                // Worker was removed by the !kill command
+                continue;
+            }
+
+            pending.Remove(worker);
+
             new Notification("Running worker", prompt).Show();
             _ = Task.Run(async () =>
             {
-                var workerCts = new CancellationTokenSource();
-                var worker = new Worker(prompt, DateTime.Now, workerCts);
                 var linkedToken = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, workerCts.Token).Token;
                 lock (awaiting) awaiting.Add(worker);
                 try
@@ -133,8 +143,16 @@ var workerManagerTask = Task.Run(() =>
                 catch (OperationCanceledException) when (!workerCts.IsCancellationRequested) { }
                 finally
                 {
-                    awaiting.Remove(worker);
-                    processing.Remove(worker);
+                    lock (awaiting)
+                    {
+                        awaiting.Remove(worker);
+                    }
+
+                    lock (processing)
+                    {
+                        processing.Remove(worker);
+                    }
+
                     semaphore.Release();
                 }
             }, cts.Token);
@@ -190,11 +208,11 @@ var runCommands = (string prompt) =>
         {
             if (awaiting.Count == 0)
             {
-                WriteLine($"There are no retrying prompts.");
+                WriteLine($"There are no failing prompts.");
             }
             else
             {
-                WriteLine($"Retrying:");
+                WriteLine($"Failing:");
                 foreach (var worker in awaiting.OrderBy(x => x.StartedOn))
                     WriteLine($"\t- {worker.Prompt} (Elapsed: {DateTime.Now - worker.StartedOn:hh\\:mm\\:ss})");
             }
@@ -214,8 +232,22 @@ var runCommands = (string prompt) =>
             }
         }
 
+        lock (pending)
+        {
+            if (pending.Count == 0)
+            {
+                WriteLine($"There are no pending prompts.");
+            }
+            else
+            {
+                WriteLine($"Pending:");
+                foreach (var worker in pending.OrderBy(x => x.StartedOn))
+                    WriteLine($"\t- {worker.Prompt} (Elapsed: {DateTime.Now - worker.StartedOn:hh\\:mm\\:ss})");
+            }
+        }
+
         var enqueued = prompts.ToArray();
-        if (processing.Count == 0)
+        if (enqueued.Length == 0)
         {
             WriteLine($"There are no waiting prompts.");
         }
@@ -266,26 +298,30 @@ var runCommands = (string prompt) =>
         {
             lock (processing)
             {
-                var matches = awaiting.Concat(processing)
-                    .Where(x => x.Prompt.StartsWith(m.Groups[1].Value.Trim(), StringComparison.OrdinalIgnoreCase));
-                var count = matches.Count();
-                if (count > 1)
+                lock (pending)
                 {
-                    WriteLine($"More than one match was found. Be more specific.", "ERR", ConsoleColor.Red);
-                    return;
+                    var matches = awaiting.Concat(processing).Concat(pending)
+                        .Where(x => x.Prompt.StartsWith(m.Groups[1].Value.Trim(), StringComparison.OrdinalIgnoreCase));
+                    var count = matches.Count();
+                    if (count > 1)
+                    {
+                        WriteLine($"More than one match was found. Be more specific.", "ERR", ConsoleColor.Red);
+                        return;
+                    }
+
+                    if (count == 0)
+                    {
+                        WriteLine($"No matches.", "ERR", ConsoleColor.Red);
+                        return;
+                    }
+
+                    var worker = matches.Single();
+                    worker.KillSource.Cancel();
+                    WriteLine($"Discarded: {worker.Prompt}");
+                    new Notification("Discarded", worker.Prompt).Show();
+                    pending.Remove(worker);
+                    promptAvailable.Set();
                 }
-
-                if (count == 0)
-                {
-                    WriteLine($"No matches.", "ERR", ConsoleColor.Red);
-                    return;
-                }
-
-                var worker = matches.Single();
-                worker.KillSource.Cancel();
-                WriteLine($"Killed: {worker.Prompt}");
-
-                promptAvailable.Set();
             }
         }
 
