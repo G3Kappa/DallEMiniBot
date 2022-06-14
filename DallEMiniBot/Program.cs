@@ -126,20 +126,20 @@ var workerManagerTask = Task.Run(() =>
     }
 });
 
-var command = (string prompt) => (Regex exp, Action<Match> evalMatch) =>
-{
-    var match = exp.Match(prompt);
-    if (match.Success)
-    {
-        evalMatch(match);
-        return true;
-    }
-
-    return false;
-};
-
 var runCommands = (string prompt) =>
 {
+    var command = (string prompt) => (Regex exp, Action<Match> evalMatch) =>
+    {
+        var match = exp.Match(prompt);
+        if (match.Success)
+        {
+            evalMatch(match);
+            return true;
+        }
+
+        return false;
+    };
+
     var definitions = new List<(Func<bool> Command, string Help)>
     {
         {
