@@ -311,10 +311,8 @@ var runCommands = (string prompt) =>
             {
                 if (enqueued.Contains(worker.Prompt))
                 {
-                    for (int i = 0; i < enqueued.Length; ++i)
+                    for (int i = 0; i < enqueued.Length && prompts.TryDequeue(out var p) && !p.Equals(worker.Prompt); ++i)
                     {
-                        if (prompts.TryDequeue(out var p) && p.Equals(worker.Prompt))
-                            break;
                         prompts.Enqueue(p!);
                     }
                 }
