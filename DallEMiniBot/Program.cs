@@ -11,8 +11,8 @@ var settings = (
 );
 var prompts = new ConcurrentQueue<string>();
 var promptAvailable = new AutoResetEvent(false);
-var awaiting = new HashSet<(string Prompt, DateTime StartedOn)>();
-var processing = new HashSet<(string Prompt, DateTime StartedOn)>();
+var awaiting = new HashSet<Worker>();
+var processing = new HashSet<Worker>();
 var cts = new CancellationTokenSource();
 
 Notification.SetupEvents();
@@ -23,17 +23,17 @@ Console.CancelKeyPress += (s, e) =>
     promptAvailable.Set();
 };
 
-var getBackgroundWorker = async (string prompt, Action onRequestHeld) =>
+var getBackgroundWorker = async (string prompt, Action onRequestHeld, CancellationToken ct) =>
 {
     var rand = new Random();
 
     var maybeImages = default(IEnumerable<byte[]>?);
-    while (!cts.IsCancellationRequested)
+    while (!ct.IsCancellationRequested)
     {
         using var client = new DallEClient();
-        var request = client.TryGetImages(prompt!, settings.RetryTimeout, onRequestHeld, cts.Token);
-        var delay = Task.Delay(settings.RetryTimeout, cts.Token);
-        var waitAny = Task.WaitAny(new[] { request, delay }, cts.Token);
+        var request = client.TryGetImages(prompt!, settings.RetryTimeout, onRequestHeld, ct);
+        var delay = Task.Delay(settings.RetryTimeout, ct);
+        var waitAny = Task.WaitAny(new[] { request, delay }, ct);
 
         switch (waitAny)
         {
@@ -60,14 +60,14 @@ var getBackgroundWorker = async (string prompt, Action onRequestHeld) =>
 
         if (maybeImages is null)
         {
-            await Task.Delay(rand.Next(250, 750), cts.Token);
+            await Task.Delay(rand.Next(250, 750), ct);
             continue;
         }
 
         break;
     }
 
-    if (cts.IsCancellationRequested)
+    if (ct.IsCancellationRequested)
         return;
 
     var outputDir = settings.OutputDirectory;
@@ -82,7 +82,7 @@ var getBackgroundWorker = async (string prompt, Action onRequestHeld) =>
     foreach (var (image, index) in maybeImages!.Select((e, i) => (e, i)))
     {
         var fn = $"{baseFn}{index + 1}.png";
-        await Save(image, fn, cts.Token);
+        await Save(image, fn, ct);
     }
 
     new Notification("Generated", prompt!, $"{baseFn}1.png").Show();
@@ -114,19 +114,30 @@ var workerManagerTask = Task.Run(() =>
             new Notification("Running worker", prompt).Show();
             _ = Task.Run(async () =>
             {
-                var awaitingDesc = (prompt, DateTime.Now);
-                lock (awaiting) awaiting.Add(awaitingDesc);
-                await getBackgroundWorker(prompt, () =>
+                var workerCts = new CancellationTokenSource();
+                var worker = new Worker(prompt, DateTime.Now, workerCts);
+                var linkedToken = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, workerCts.Token).Token;
+                lock (awaiting) awaiting.Add(worker);
+                try
                 {
-                    lock (awaiting)
-                        awaiting.Remove(awaitingDesc);
-                    lock (processing)
-                        processing.Add(awaitingDesc);
+                    await getBackgroundWorker(prompt, () =>
+                    {
+                        lock (awaiting)
+                            awaiting.Remove(worker);
+                        lock (processing)
+                            processing.Add(worker);
 
-                    new Notification("Generation in progress", prompt!).Show();
-                });
-                processing.Remove(awaitingDesc);
-                semaphore.Release();
+                        new Notification("Generation in progress", prompt!).Show();
+                    }, linkedToken);
+                }
+                catch (OperationCanceledException)
+                { }
+                finally
+                {
+                    awaiting.Remove(worker);
+                    processing.Remove(worker);
+                    semaphore.Release();
+                }
             }, cts.Token);
         }
     }
@@ -159,6 +170,10 @@ var runCommands = (string prompt) =>
         {
             (Command: () => command(prompt)(new(@"^\s*!retry_timeout(\s+\d+)?\s*$", RegexOptions.Compiled), GetOrSetRetryTimeout),
                 Help: "!retry_timeout: gets or sets the amount of time after which a waiting request will be dropped and recycled (in seconds).")
+        },
+        {
+            (Command: () => command(prompt)(new(@"^\s*!kill(\s+.*?)?\s*$", RegexOptions.Compiled), Kill),
+                Help: "!kill: kills a worker and stops all underlying requests.")
         },
     };
 
@@ -240,6 +255,43 @@ var runCommands = (string prompt) =>
         WriteLine($"Retry timeout: {oldVal}->{newVal}");
     }
 
+    void Kill(Match m)
+    {
+        if (!m.Groups[1].Success)
+        {
+            WriteLine($"Usage: !kill <start of prompt>");
+            return;
+        }
+
+        lock (awaiting)
+        {
+            lock (processing)
+            {
+                var matches = awaiting.Concat(processing)
+                    .Where(x => x.Prompt.StartsWith(m.Groups[1].Value.Trim(), StringComparison.OrdinalIgnoreCase));
+                var count = matches.Count();
+                if (count > 1)
+                {
+                    WriteLine($"More than one match was found. Be more specific.", "ERR", ConsoleColor.Red);
+                    return;
+                }
+
+                if (count == 0)
+                {
+                    WriteLine($"No matches.", "ERR", ConsoleColor.Red);
+                    return;
+                }
+
+                var worker = matches.Single();
+                worker.KillSource.Cancel();
+                WriteLine($"Killed: {worker.Prompt}");
+
+                promptAvailable.Set();
+            }
+        }
+
+    }
+
     void UnknownCommand(Match m) => Console.WriteLine($"Unknown command: {m.Groups[1].Value}");
     void ListCommands(Match m)
     {
@@ -277,3 +329,5 @@ static void WriteLine(string msg, string tag = "SYS", ConsoleColor fg = ConsoleC
     Console.WriteLine($"{tag} {msg}");
     Console.ForegroundColor = ConsoleColor.White;
 }
+
+public readonly record struct Worker(string Prompt, DateTime StartedOn, CancellationTokenSource KillSource);
