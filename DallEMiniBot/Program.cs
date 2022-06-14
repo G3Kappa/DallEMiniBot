@@ -104,7 +104,6 @@ var workerManagerTask = Task.Run(() =>
 
         while (prompts.TryDequeue(out var prompt))
         {
-
             semaphore.Wait();
             new Notification("Running worker", prompt).Show();
             _ = Task.Run(async () =>
