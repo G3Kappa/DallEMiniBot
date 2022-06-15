@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.Options;
+﻿using ImageMagick;
+using Microsoft.Extensions.Options;
 using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 
@@ -90,12 +91,38 @@ public sealed class DallEService
             await Save(image, fn, ct);
         }
 
-        Host.Notification("Generated", prompt!, $"{baseFn}1.png");
+        var mosaic = Mosaic(baseFn);
+
+        Host.Notification("Generated", prompt!, mosaic.FileName);
 
         static async Task Save(ReadOnlyMemory<byte> image, string fn, CancellationToken ct)
         {
             using var fs = File.OpenWrite(fn);
             await fs.WriteAsync(image, ct);
+        }
+
+        static MagickImage Mosaic(string folder)
+        {
+            const string fn = "Mosaic.png";
+            var regexp = new Regex(@"(\d)\.png$");
+
+            using var collection = new MagickImageCollection();
+            foreach (var file in Directory.EnumerateFiles(folder))
+            {
+                if (regexp.Match(file) is not { Success: true } match)
+                    continue;
+                var image = new MagickImage(file);
+                var i = int.Parse(match.Groups[1].Value) - 1;
+                var side = (int)Math.Sqrt(image.Width * image.Height);
+                var (x, y) = (i % 3 * side, i / 3 * side);
+                image.Page = new MagickGeometry(x, y, side, side);
+                collection.Add(image);
+            }
+
+            using var result = collection.Mosaic();
+            var outFn = Path.Combine(folder, fn);
+            result.Write(outFn);
+            return new(outFn);
         }
     }
 
@@ -200,7 +227,7 @@ public sealed class DallEService
                 Help: "!retry_timeout: gets or sets the amount of time after which a running worker will be killed and its prompt re-enqueued (in seconds)")
             },
             {
-                (Command: () => command(prompt)(new(@"^\s*!kill(\s+[^\s]+?)?\s*$", RegexOptions.Compiled), Kill),
+                (Command: () => command(prompt)(new(@"^\s*!kill(\s+.*?)?\s*$", RegexOptions.Compiled), Kill),
                 Help: "!kill: kills a worker and stops all underlying requests")
             }
         };
